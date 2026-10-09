@@ -186,6 +186,22 @@
     display: grid; place-items: center; cursor: pointer; }
   .step:disabled { opacity: .35; cursor: default; }
 
+  /* Day-by-day chart */
+  .trend { margin-top: 12px; }
+  .trend svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .trend .grid { stroke: var(--line); stroke-width: 1; }
+  .trend .axis { fill: var(--muted); font: 600 9px var(--body); }
+  .trend .bar { fill: var(--accent); }
+  .trend.leaks .bar { fill: var(--warn); }
+  .trend .bar.sel { fill: var(--ink); }
+  .trend .zero { fill: var(--muted); }
+  .trend .divider { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .trend .period { fill: var(--ink); font: 700 9.5px var(--display); letter-spacing: .06em; text-transform: uppercase; }
+  .trend .avg { stroke: var(--ink); stroke-width: 2; stroke-dasharray: 5 3; opacity: .75; }
+  .trend .avglabel { fill: var(--ink); font: 700 9px var(--body); }
+  .trend .hit { fill: transparent; cursor: pointer; }
+  .trend-info { min-height: 1.4em; margin-top: 6px; }
+
   /* Bottom sheet */
   .sheet-wrap { position: fixed; inset: 0; z-index: 20; background: rgba(10, 12, 20, .45); display: flex; align-items: flex-end; justify-content: center; }
   .sheet {
@@ -281,6 +297,15 @@
     <h1 id="cmpTitle">Before and after</h1>
     <p class="lead" id="cmpHelp"></p>
     <div id="compare" class="compare"></div>
+
+    <div class="section-h">Day by day</div>
+    <div class="seg" id="trendPick" role="group" aria-label="Measure to chart">
+      <button class="opt" type="button" data-metric="leaks" aria-pressed="true">Accidents</button>
+      <button class="opt" type="button" data-metric="pads" aria-pressed="false">Pads</button>
+      <button class="opt" type="button" data-metric="bms" aria-pressed="false">Movements</button>
+    </div>
+    <div class="trend" id="trend"></div>
+    <p class="small trend-info" id="trendInfo" aria-live="polite"></p>
 
     <div class="section-h">PDF for your doctor</div>
     <p class="lead">Your name and date of birth appear on the report only. Leave them blank if you prefer.</p>
@@ -766,6 +791,7 @@
     $("tPads").textContent = tday && tday.pads != null ? tday.pads : "-";
     renderHero(dates);
     renderCompare();
+    renderTrend();
   }
 
   // Which period today is in, and which day of it.
@@ -896,6 +922,119 @@
         d: fmt(d, r[2] || (r[1] === "large" || r[1] === "passive" ? 1 : 0), r[3]), change: change(b, d, r[3] === "%"), better: better };
     });
   }
+
+  // ---- day-by-day chart data
+  var TREND = {
+    leaks: { label: "Accidents", unit: "accident" },
+    pads: { label: "Pads used", unit: "pad" },
+    bms: { label: "Bowel movements", unit: "movement" }
+  };
+  var trendMetric = "leaks";
+  // The chart covers the pre-op and post-op windows when a treatment date is set,
+  // otherwise the diary so far (up to the last 60 days).
+  function trendRange() {
+    var dates = allDates().sort(), today = todayStr(), start = store.treatStart;
+    if (!dates.length) return null;
+    if (start) {
+      var to = addDays(start, DAYS - 1);
+      return { from: addDays(start, -DAYS), to: to < today ? to : today, split: start };
+    }
+    var from = dates[0];
+    if (daySpan(from, today) > 60) from = addDays(today, -59);
+    return { from: from, to: today, split: null };
+  }
+  function dayValue(metric, d) {
+    var es = store.entries.filter(function (e) { return e.date === d; }), day = store.days[d];
+    if (metric === "pads") return day && day.pads != null ? day.pads : null;
+    if (!es.length && !day) return null; // nothing logged that day
+    return metric === "leaks" ? es.filter(isLeak).length : es.filter(function (e) { return !isLeak(e); }).length;
+  }
+  function trendSeries(metric) {
+    var r = trendRange();
+    if (!r) return null;
+    var pts = [];
+    for (var d = r.from; d <= r.to; d = addDays(d, 1)) pts.push({ date: d, v: dayValue(metric, d) });
+    // Average per logged day in each period
+    function avg(list) {
+      var got = list.filter(function (p) { return p.v != null; });
+      return got.length ? got.reduce(function (a, p) { return a + p.v; }, 0) / got.length : null;
+    }
+    var si = r.split ? pts.findIndex(function (p) { return p.date >= r.split; }) : -1;
+    return { pts: pts, split: si, avgBefore: si > 0 ? avg(pts.slice(0, si)) : null,
+      avgAfter: si >= 0 ? avg(pts.slice(si)) : avg(pts) };
+  }
+  function shortDate(d) { return parseDate(d).toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
+
+  function renderTrend() {
+    var box = $("trend"), info = $("trendInfo");
+    var t = trendSeries(trendMetric);
+    box.className = "trend " + trendMetric;
+    if (!t) { box.innerHTML = '<p class="empty">The chart appears once you have entries.</p>'; info.textContent = ""; return; }
+    var n = t.pts.length, W = 340, H = 168, L = 22, R = 6, T = 20, B = 22, pw = W - L - R, ph = H - T - B;
+    var max = Math.max(1, Math.max.apply(null, t.pts.map(function (p) { return p.v || 0; })));
+    if (max > 4) max = Math.ceil(max / 2) * 2;
+    var ticks = max <= 4 ? Array.apply(null, Array(max + 1)).map(function (_, i) { return i; }) : [0, max / 2, max];
+    var step = pw / n, bw = Math.max(2, step - 2);
+    function y(v) { return T + ph - v / max * ph; }
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="' + TREND[trendMetric].label + ' per day">';
+    ticks.forEach(function (v) {
+      svg += '<line class="grid" x1="' + L + '" x2="' + (W - R) + '" y1="' + y(v) + '" y2="' + y(v) + '"/>' +
+        '<text class="axis" x="' + (L - 5) + '" y="' + (y(v) + 3) + '" text-anchor="end">' + v + '</text>';
+    });
+    t.pts.forEach(function (p, i) {
+      var x = L + i * step + (step - bw) / 2;
+      if (p.v > 0) {
+        var top = y(p.v), h = T + ph - top, r = Math.min(4, bw / 2, h);
+        svg += '<path class="bar" data-i="' + i + '" d="M' + x + ',' + (T + ph) + 'V' + (top + r) + 'Q' + x + ',' + top + ' ' + (x + r) + ',' + top +
+          'H' + (x + bw - r) + 'Q' + (x + bw) + ',' + top + ' ' + (x + bw) + ',' + (top + r) + 'V' + (T + ph) + 'Z"/>';
+      } else if (p.v === 0) {
+        svg += '<circle class="zero" cx="' + (x + bw / 2) + '" cy="' + (T + ph - 2) + '" r="1.8"/>';
+      }
+    });
+    function avgTxt(a) { return a == null ? "" : " · avg " + a.toFixed(1); }
+    function avgLine(a, i0, i1) {
+      if (a == null) return "";
+      var x0 = L + i0 * step, x1 = L + i1 * step, yy = y(a);
+      return '<line class="avg" x1="' + x0 + '" x2="' + x1 + '" y1="' + yy + '" y2="' + yy + '"/>';
+    }
+    if (t.split > 0) {
+      var sx = L + t.split * step;
+      svg += '<line class="divider" x1="' + sx + '" x2="' + sx + '" y1="' + (T - 14) + '" y2="' + (T + ph) + '"/>' +
+        '<text class="period" x="' + (sx - 5) + '" y="' + (T - 7) + '" text-anchor="end">' + esc(BL + avgTxt(t.avgBefore)) + '</text>' +
+        '<text class="period" x="' + (sx + 5) + '" y="' + (T - 7) + '">' + esc(AL + avgTxt(t.avgAfter)) + '</text>';
+      svg += avgLine(t.avgBefore, 0, t.split) + avgLine(t.avgAfter, t.split, n);
+    } else {
+      svg += '<text class="period" x="' + L + '" y="' + (T - 7) + '">' + esc("Average" + avgTxt(t.avgAfter).replace(" · avg", "")) + '</text>' + avgLine(t.avgAfter, 0, n);
+    }
+    var labels = [[0, "start"]];
+    if (t.split > 0) labels.push([t.split, "middle"]);
+    labels.push([n - 1, "end"]);
+    labels.forEach(function (l) {
+      var cx = L + l[0] * step + step / 2;
+      svg += '<text class="axis" x="' + (l[1] === "start" ? L : l[1] === "end" ? W - R : cx) + '" y="' + (H - 6) + '" text-anchor="' + l[1] + '">' + esc(shortDate(t.pts[l[0]].date)) + '</text>';
+    });
+    t.pts.forEach(function (p, i) {
+      svg += '<rect class="hit" data-i="' + i + '" x="' + (L + i * step) + '" y="' + T + '" width="' + step + '" height="' + ph + '"/>';
+    });
+    box.innerHTML = svg + '</svg>';
+    function show(i) {
+      var p = t.pts[i];
+      Array.prototype.forEach.call(box.querySelectorAll(".bar"), function (b) { b.classList.toggle("sel", +b.getAttribute("data-i") === i); });
+      info.textContent = niceDate(p.date) + ": " + (p.v == null ? "nothing logged" : plural(p.v, TREND[trendMetric].unit));
+    }
+    Array.prototype.forEach.call(box.querySelectorAll(".hit"), function (h) {
+      h.addEventListener("mouseenter", function () { show(+h.getAttribute("data-i")); });
+      h.addEventListener("click", function () { show(+h.getAttribute("data-i")); });
+    });
+    info.textContent = "Tap a bar to see that day. Dots mark logged days with none. Dashed lines show the average per logged day.";
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("#trendPick button"), function (b) {
+    b.addEventListener("click", function () {
+      trendMetric = b.getAttribute("data-metric");
+      Array.prototype.forEach.call(document.querySelectorAll("#trendPick button"), function (o) { o.setAttribute("aria-pressed", String(o === b)); });
+      renderTrend();
+    });
+  });
 
   function renderCompare() {
     var box = $("compare");
@@ -1085,6 +1224,57 @@
     }
 
     // Bristol type chart (bowel movements only)
+    // Day-by-day charts: accidents, then pads if any were recorded
+    function pdfTrend(metric, colorRgb) {
+      var t = trendSeries(metric);
+      if (!t) return;
+      heading(TREND[metric].label + " per day", 62); y += 4;
+      var x0 = M + 8, w = R - x0, h = 38, top = y + 6, n = t.pts.length, step = w / n, bw = Math.max(0.8, step - 0.8);
+      var max = Math.max(1, Math.max.apply(null, t.pts.map(function (p) { return p.v || 0; })));
+      if (max > 4) max = Math.ceil(max / 2) * 2;
+      var ticks = max <= 4 ? Array.apply(null, Array(max + 1)).map(function (_, i) { return i; }) : [0, max / 2, max];
+      function yy(v) { return top + h - v / max * h; }
+      doc.setDrawColor(LINE[0], LINE[1], LINE[2]); doc.setLineWidth(0.2);
+      color(MUTED); font("normal", 7);
+      ticks.forEach(function (v) { doc.line(x0, yy(v), R, yy(v)); doc.text(String(v), x0 - 2, yy(v) + 1, { align: "right" }); });
+      doc.setFillColor(colorRgb[0], colorRgb[1], colorRgb[2]);
+      t.pts.forEach(function (p, i) {
+        var bx = x0 + i * step + (step - bw) / 2;
+        if (p.v > 0) doc.rect(bx, yy(p.v), bw, top + h - yy(p.v), "F");
+      });
+      doc.setFillColor(MUTED[0], MUTED[1], MUTED[2]);
+      t.pts.forEach(function (p, i) { if (p.v === 0) doc.circle(x0 + i * step + step / 2, top + h - 0.6, 0.45, "F"); });
+      doc.setDrawColor(INK[0], INK[1], INK[2]); doc.setLineWidth(0.4);
+      function avgLine(a, i0, i1) {
+        if (a == null) return;
+        doc.setLineDashPattern([1.2, 0.8], 0);
+        doc.line(x0 + i0 * step, yy(a), x0 + i1 * step, yy(a));
+        doc.setLineDashPattern([], 0);
+      }
+      if (t.split > 0) {
+        var sx = x0 + t.split * step;
+        doc.setLineDashPattern([0.8, 0.8], 0); doc.line(sx, top - 4, sx, top + h); doc.setLineDashPattern([], 0);
+        color(INK); font("bold", 7.5);
+        function at(a) { return a == null ? "" : "  -  AVG " + a.toFixed(1); }
+        doc.text(pdfText(BL).toUpperCase() + at(t.avgBefore), sx - 1.5, top - 1.5, { align: "right" });
+        doc.text(pdfText(AL).toUpperCase() + at(t.avgAfter), sx + 1.5, top - 1.5);
+        avgLine(t.avgBefore, 0, t.split); avgLine(t.avgAfter, t.split, n);
+      } else {
+        avgLine(t.avgAfter, 0, n);
+        if (t.avgAfter != null) { color(INK); font("bold", 7.5); doc.text("AVERAGE " + t.avgAfter.toFixed(1), x0, top - 1.5); }
+      }
+      color(MUTED); font("normal", 7);
+      doc.text(shortDate(t.pts[0].date), x0, top + h + 4);
+      if (t.split > 0) doc.text(shortDate(t.pts[t.split].date), x0 + t.split * step + step / 2, top + h + 4, { align: "center" });
+      doc.text(shortDate(t.pts[n - 1].date), R, top + h + 4, { align: "right" });
+      y = top + h + 11;
+    }
+    pdfTrend("leaks", WARN);
+    if (trendSeries("pads") && trendSeries("pads").pts.some(function (p) { return p.v != null; })) pdfTrend("pads", TEAL);
+    color(MUTED); font("normal", 8);
+    doc.text("Dots mark logged days with none. Dashed lines show the average per logged day in each period.", M, y - 3);
+    y += 4;
+
     heading("Stool type (Bristol scale), bowel movements", 70); y += 6;
     var max = Math.max.apply(null, s.types.slice(1)) || 1;
     var labelW = 62, barMax = R - M - labelW - 14;
