@@ -179,6 +179,13 @@
   .bristol svg { width: 100%; max-width: 38px; height: 22px; color: var(--muted); }
   .bristol button[aria-pressed="true"] svg { color: var(--accent); }
 
+  /* Date and time steppers, so a past day can be picked without the phone's pop-up */
+  .stepper { display: flex; gap: 6px; }
+  .stepper input { flex: 1; min-width: 0; text-align: center; }
+  .step { flex: none; width: 52px; min-height: 46px; border: 0; border-radius: 10px; background: var(--soft); color: var(--accent);
+    display: grid; place-items: center; cursor: pointer; }
+  .step:disabled { opacity: .35; cursor: default; }
+
   /* Bottom sheet */
   .sheet-wrap { position: fixed; inset: 0; z-index: 20; background: rgba(10, 12, 20, .45); display: flex; align-items: flex-end; justify-content: center; }
   .sheet {
@@ -351,10 +358,11 @@
       <button id="kindBm" type="button" aria-pressed="true">Bowel movement</button>
       <button id="kindLeak" type="button" aria-pressed="false">Accident</button>
     </div>
-    <div class="row">
-      <div><label class="f" for="date">Date</label><input type="date" id="date"></div>
-      <div><label class="f" for="time">Time</label><input type="time" id="time"></div>
-    </div>
+    <label class="f" for="date">Date</label>
+    <div class="stepper"><button type="button" class="step" data-step="date" data-n="-1" aria-label="Previous day"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><input type="date" id="date"><button type="button" class="step" data-step="date" data-n="1" aria-label="Next day"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>
+    <div class="hint" id="dateNice"></div>
+    <label class="f" for="time">Time</label>
+    <div class="stepper"><button type="button" class="step" data-step="time" data-n="-1" aria-label="30 minutes earlier"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><input type="time" id="time"><button type="button" class="step" data-step="time" data-n="1" aria-label="30 minutes later"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>
 
     <div id="leakFields" hidden>
       <label class="f">How much?</label>
@@ -391,10 +399,11 @@
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dayTitle">
     <div class="grab"></div>
     <div class="sheet-head"><h2 id="dayTitle">Day notes</h2><button class="x" type="button" data-close aria-label="Close">✕</button></div>
-    <div class="row">
-      <div><label class="f" for="dayDate">Date</label><input type="date" id="dayDate"></div>
-      <div><label class="f" for="dayPads">Pads used</label><input type="number" id="dayPads" min="0" max="50" inputmode="numeric" placeholder="0"></div>
-    </div>
+    <label class="f" for="dayDate">Date</label>
+    <div class="stepper"><button type="button" class="step" data-step="dayDate" data-n="-1" aria-label="Previous day"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><input type="date" id="dayDate"><button type="button" class="step" data-step="dayDate" data-n="1" aria-label="Next day"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button></div>
+    <div class="hint" id="dayDateNice"></div>
+    <label class="f" for="dayPads">Pads used</label>
+    <input type="number" id="dayPads" min="0" max="50" inputmode="numeric" placeholder="0">
     <label class="f" for="dayText">Food, drink, medication, stress, sleep, bloating</label>
     <textarea id="dayText" placeholder="e.g. 3 coffees, wine with dinner, poor sleep, bloated in the evening"></textarea>
     <div class="seg" style="margin-top:12px">
@@ -1312,6 +1321,37 @@
     navigator.serviceWorker.register("sw.js").then(function (reg) { reg.update(); }).catch(function () {});
   }
 
+  // ---- date and time steppers
+  function niceRel(d) {
+    var diff = daySpan(d, todayStr()) - 1;
+    var rel = diff === 0 ? "today" : diff === 1 ? "yesterday" : diff > 1 ? diff + " days ago" : "in the future";
+    return niceDate(d) + " (" + rel + ")";
+  }
+  function refreshDates() {
+    [["date", "dateNice"], ["dayDate", "dayDateNice"]].forEach(function (p) {
+      var v = $(p[0]).value;
+      $(p[1]).textContent = v ? niceRel(v) : "";
+      var next = $(p[0]).parentNode.querySelector('[data-n="1"]');
+      next.disabled = !v || v >= todayStr();
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll(".step"), function (b) {
+    b.addEventListener("click", function () {
+      var id = b.getAttribute("data-step"), n = +b.getAttribute("data-n"), el = $(id);
+      if (el.type === "date") {
+        var next = addDays(el.value || todayStr(), n);
+        if (next > todayStr()) return;
+        el.value = next;
+        if (id === "dayDate") loadDay();
+      } else {
+        var t = (el.value || nowTime()).split(":"), mins = (+t[0] * 60 + +t[1] + n * 30 + 1440) % 1440;
+        el.value = pad(Math.floor(mins / 60)) + ":" + pad(mins % 60);
+      }
+      refreshDates();
+    });
+  });
+  ["date", "dayDate"].forEach(function (id) { $(id).addEventListener("change", refreshDates); });
+
   // ---- tabs and sheets
   function showView(name) {
     ["today", "history", "report", "more"].forEach(function (v) { $("view-" + v).hidden = v !== name; });
@@ -1336,8 +1376,8 @@
     document.body.style.overflow = "";
     if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
-  function openEntry(k) { resetForm(); setKind(k); openSheet("entrySheet"); }
-  function openDay() { $("dayDate").value = todayStr(); loadDay(); openSheet("daySheet"); }
+  function openEntry(k) { resetForm(); setKind(k); refreshDates(); openSheet("entrySheet"); }
+  function openDay() { $("dayDate").value = todayStr(); loadDay(); refreshDates(); openSheet("daySheet"); }
   $("addBm").addEventListener("click", function () { openEntry("bm"); });
   $("addLeak").addEventListener("click", function () { openEntry("leak"); });
   $("statBm").addEventListener("click", function () { openEntry("bm"); });
